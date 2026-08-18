@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=MoMo Snap daemon
+Comment=Keeps MoMo Snap warm so F1 captures instantly
+Exec=/home/kg/Projects/snipkg/momosnap-run --daemon
+Icon=applets-screenshooter
+Terminal=false
+NoDisplay=true
+X-GNOME-Autostart-enabled=true

@@ -1,0 +1,3 @@
+[D-BUS Service]
+Name=vip.momo.Snap
+Exec=/home/kg/Projects/snipkg/momosnap-run --gapplication-service

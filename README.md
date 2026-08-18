@@ -37,7 +37,9 @@ to launch the tool.
   unless you ask; `Ctrl+S` saves to `~/Pictures/Screenshots` with a notification
 - **Correct on HiDPI / fractional scaling** (tested at 125%)
 - **Single instance** — mashing the hotkey while a capture is open does nothing
-- **Small** — plain Python + GTK4, ~800 lines, no daemon, no tray, no telemetry
+- **Instant** — a small resident daemon keeps GTK and GStreamer warm; a press
+  shows the overlay in under 0.2 s, measured press-to-visible
+- **Small** — plain Python + GTK4, ~900 lines, no tray, no telemetry
 
 ## Install (Ubuntu / Debian)
 
@@ -57,9 +59,25 @@ Fedora: `sudo dnf install python3-gobject python3-cairo gtk4 pipewire-gstreamer 
 P=/org/gnome/settings-daemon/plugins/media-keys/custom-keybindings/momosnap/
 gsettings set org.gnome.settings-daemon.plugins.media-keys custom-keybindings "['$P']"
 gsettings set org.gnome.settings-daemon.plugins.media-keys.custom-keybinding:$P name 'MoMo Snap'
-gsettings set org.gnome.settings-daemon.plugins.media-keys.custom-keybinding:$P command "$PWD/momosnap-run"
+gsettings set org.gnome.settings-daemon.plugins.media-keys.custom-keybinding:$P command 'gapplication launch vip.momo.Snap'
 gsettings set org.gnome.settings-daemon.plugins.media-keys.custom-keybinding:$P binding 'F1'
 ```
+
+### Make it instant (recommended)
+
+MoMo Snap runs as a small resident daemon; the hotkey just pokes it over
+D-Bus, so a capture appears in under 0.2 seconds. Install the two helper
+files (edit the paths inside to where you cloned the repo):
+
+```bash
+sed "s|/home/kg/Projects/snipkg|$PWD|" vip.momo.Snap.service.example   > ~/.local/share/dbus-1/services/vip.momo.Snap.service
+sed "s|/home/kg/Projects/snipkg|$PWD|" momosnap-daemon.desktop.example   > ~/.config/autostart/momosnap-daemon.desktop
+./momosnap-run --daemon &   # start it now; autostart covers future logins
+```
+
+The service file lets D-Bus revive the daemon automatically if it ever dies.
+Without these files everything still works — `momosnap-run` as the hotkey
+command captures on demand — it is just slower on the first press.
 
 Change `'F1'` to any key you like (`'Print'`, `'<Super>s'`, ...). You can do the
 same thing in **Settings → Keyboard → Custom Shortcuts** if you prefer clicking.
@@ -81,7 +99,7 @@ Note that binding `F1` takes it away from "Help" in other apps.
 | `Enter` or `Ctrl+C` | Copy to clipboard and close. |
 | `Ctrl+S` | Save PNG to `~/Pictures/Screenshots` (desktop notification confirms). |
 | `Ctrl+Z` | Undo the last drawing. |
-| `Esc` / right-click | Step back: first clears the box, second quits. |
+| `Esc` / right-click | Quit the capture immediately. |
 
 ## How it works (for the curious)
 

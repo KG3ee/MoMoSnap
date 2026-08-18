@@ -601,13 +601,9 @@ class Overlay(Gtk.ApplicationWindow):
             notify("Copy failed", "The clipboard refused the image.")
             return
 
-        # On Wayland the clipboard dies with the process that owns it, so the
-        # window is hidden and the app stays alive until another program takes
-        # the clipboard over. No timeout: a paste an hour later must work.
-        # The F1 lock is released here: the overlay is gone, so the next
-        # press must start a fresh capture even while this process lingers.
-        from .main import release_lock
-        release_lock()
+        # On Wayland the clipboard dies with the process that owns it. The
+        # resident app keeps the content alive; the hidden window is destroyed
+        # once another program takes the clipboard over.
         self._clipboard_held = True
         self.set_visible(False)
         clipboard.connect("changed", self._on_clipboard_changed)
@@ -647,13 +643,11 @@ class Overlay(Gtk.ApplicationWindow):
         pixbuf = self._render_selection()
         # Widget px per image px: the pin should appear at on-screen size.
         fx = (self.area.get_width() or self.img_w) / self.img_w
-        from .main import release_lock
         from .pin import PinWindow
         win = PinWindow(self.get_application(), pixbuf,
                         int(pixbuf.get_width() * fx),
                         int(pixbuf.get_height() * fx))
         win.present()
-        release_lock()               # the overlay is gone; F1 must work again
         self.close()
 
     def undo(self):
@@ -663,16 +657,8 @@ class Overlay(Gtk.ApplicationWindow):
 
     # -------------------------------------------------------------- keyboard
     def _escape(self):
-        if self.mode == "edit":
-            # First step back drops the selection, the second quits.
-            self.mode = "select"
-            self.sel = None
-            self.shapes.clear()
-            self.toolbar.set_visible(False)
-            self.area.set_cursor(Gdk.Cursor.new_from_name("crosshair"))
-            self.area.queue_draw()
-        else:
-            self.close()
+        # One press quits outright — no intermediate back-to-dim step.
+        self.close()
 
     _NUDGE = {Gdk.KEY_Left: (-1, 0), Gdk.KEY_Right: (1, 0),
               Gdk.KEY_Up: (0, -1), Gdk.KEY_Down: (0, 1)}

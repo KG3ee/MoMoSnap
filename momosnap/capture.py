@@ -5,6 +5,7 @@ reason this tool works: ScreenCast hands back a `restore_token`, so GNOME asks
 permission exactly once. The Screenshot portal pops a dialog on every single
 capture, which is what made Snipaste unusable here.
 """
+import itertools
 import json
 import os
 
@@ -26,6 +27,12 @@ TOKEN_FILE = os.path.join(CONFIG_DIR, "restore_token.json")
 
 class CaptureError(Exception):
     pass
+
+
+# Request/session token names must never repeat within one bus connection.
+# A resident process runs many captures, so a per-session counter would
+# collide ("An object is already exported") and the reply would never come.
+_TOKENS = itertools.count(1)
 
 
 def reset_token():
@@ -60,15 +67,13 @@ class _PortalSession:
         self.bus = Gio.bus_get_sync(Gio.BusType.SESSION, None)
         self.sender = self.bus.get_unique_name()[1:].replace(".", "_")
         self.loop = GLib.MainLoop()
-        self.counter = 0
         self.session = None
         self.node_id = None
         self.token = None
         self.error = None
 
     def _call(self, method, args, on_response):
-        self.counter += 1
-        handle = f"momosnap{self.counter}"
+        handle = f"momosnap{os.getpid()}_{next(_TOKENS)}"
         path = f"{OBJ_PATH}/request/{self.sender}/{handle}"
         sub = []
 
@@ -129,7 +134,8 @@ class _PortalSession:
     def open(self, timeout_seconds=300):
         self._call(
             "CreateSession",
-            ({"session_handle_token": GLib.Variant("s", "momosnap")},),
+            ({"session_handle_token": GLib.Variant(
+                "s", f"momosnap{os.getpid()}_{next(_TOKENS)}")},),
             self._on_session,
         )
         GLib.timeout_add_seconds(timeout_seconds, lambda: (self.loop.quit(), False)[1])

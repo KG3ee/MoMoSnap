@@ -1,6 +1,20 @@
-"""Entry point: grab the screen, then hand it to the overlay."""
-import fcntl
-import os
+"""Entry point.
+
+MoMo Snap runs as a small resident app. The first launch becomes the daemon:
+it stays alive after the overlay closes, keeping Python, GTK and GStreamer
+warm. Every later F1 press is a tiny client process that forwards an
+"activate" to the daemon over the session bus and exits; the daemon only has
+to pull one frame and map a window, which is what makes the capture feel
+instant.
+
+This uses GApplication uniqueness on purpose. The old stale-screenshot bug
+happened because the frame was captured BEFORE run() in every process, so a
+forwarded activation showed an old frame. Capture now happens INSIDE
+do_activate, in the daemon, at press time — always fresh.
+
+`momosnap-run --daemon` starts the resident process without showing an
+overlay; put that in autostart so even the first press after login is fast.
+"""
 import shutil
 import subprocess
 import sys
@@ -8,54 +22,10 @@ import sys
 import gi
 
 gi.require_version("Gtk", "4.0")
-from gi.repository import Gio, GLib, Gtk  # noqa: E402
-
-_LOCK_FD = None
-
-
-def acquire_lock():
-    """One overlay at a time: F1 while a capture is on screen is ignored."""
-    global _LOCK_FD
-    path = os.path.join(GLib.get_user_runtime_dir(), "momosnap.lock")
-    fd = os.open(path, os.O_CREAT | os.O_RDWR, 0o600)
-    try:
-        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except OSError:
-        os.close(fd)
-        return False
-    _LOCK_FD = fd
-    return True
-
-
-def release_lock():
-    """Called when the overlay leaves the screen. The clipboard holder keeps
-    living without the lock, so the NEXT F1 press must work again."""
-    global _LOCK_FD
-    if _LOCK_FD is not None:
-        try:
-            fcntl.flock(_LOCK_FD, fcntl.LOCK_UN)
-            os.close(_LOCK_FD)
-        except OSError:
-            pass
-        _LOCK_FD = None
+from gi.repository import Gtk  # noqa: E402
 
 from .capture import CaptureError, grab_screen, reset_token
 from .overlay import Overlay
-
-
-class MoMoSnap(Gtk.Application):
-    def __init__(self):
-        # NON_UNIQUE matters: with a unique app id, a second F1 press while a
-        # previous instance is still holding the clipboard would forward the
-        # activation to the OLD process, which would then show its OLD
-        # screenshot. Every press must be its own process with a fresh frame.
-        super().__init__(application_id="vip.momo.Snap",
-                         flags=Gio.ApplicationFlags.NON_UNIQUE)
-        self.pixbuf = None
-
-    def do_activate(self):
-        win = Overlay(self, self.pixbuf)
-        win.present()
 
 
 def notify(summary, body=""):
@@ -64,36 +34,78 @@ def notify(summary, body=""):
         subprocess.Popen(["notify-send", "-a", "MoMo Snap", summary, body])
 
 
-def main(argv=None):
-    argv = list(sys.argv if argv is None else argv)
+class MoMoSnap(Gtk.Application):
+    def __init__(self, daemon_start):
+        super().__init__(application_id="vip.momo.Snap")
+        self._boot_quietly = daemon_start
+        self._overlay = None
 
-    if not acquire_lock():
-        # An overlay is already open; repeated F1 presses are ignored.
-        return 0
+    def do_startup(self):
+        Gtk.Application.do_startup(self)
+        self.hold()   # stay resident after windows close
+        # Pre-warm GStreamer so the FIRST capture is as fast as the rest:
+        # registry load and plugin dlopen happen now, not at press time.
+        gi.require_version("Gst", "1.0")
+        from gi.repository import Gst
+        Gst.init(None)
+        for factory in ("pipewiresrc", "videoconvert"):
+            Gst.ElementFactory.make(factory, None)
 
-    # The screen is captured BEFORE any window exists, otherwise the overlay
-    # would photograph itself.
-    try:
-        pixbuf = grab_screen()
-    except CaptureError as exc:
-        if str(exc) == "cancelled":
-            return 0
-        # A stale or revoked restore token is the usual cause. Drop it and try
-        # once more; that brings the permission dialog back instead of failing.
-        reset_token()
+    def do_activate(self):
+        if self._boot_quietly:
+            # --daemon: first activation only boots the resident process.
+            self._boot_quietly = False
+            from gi.repository import GLib
+
+            def prewarm():
+                # Throwaway capture: the first portal handshake and the first
+                # PipeWire/GStreamer pipeline in a process are the expensive
+                # ones. Paying them at login makes the first F1 press as fast
+                # as every other. Failure here is fine; a real press retries.
+                try:
+                    grab_screen()
+                except CaptureError:
+                    pass
+                # The first GTK window in a process also pays one-time costs
+                # (GPU renderer, theme). Realizing a hidden dummy window pays
+                # them now, without anything appearing on screen.
+                w = Gtk.Window(application=self)
+                w.set_default_size(1, 1)
+                w.realize()
+                w.destroy()
+                return False
+
+            GLib.idle_add(prewarm)
+            return
+        if self._overlay is not None and self._overlay.get_mapped():
+            # A capture is already on screen; repeated F1 presses are no-ops.
+            return
         try:
             pixbuf = grab_screen()
-        except CaptureError as exc2:
-            if str(exc2) == "cancelled":
-                return 0
-            print(f"MoMo Snap: could not capture the screen: {exc2}",
-                  file=sys.stderr)
-            notify("MoMo Snap could not capture the screen", str(exc2))
-            return 1
+        except CaptureError as exc:
+            if str(exc) == "cancelled":
+                return
+            # A stale/revoked token is the usual cause: drop it, try once
+            # more so the permission dialog comes back instead of failing.
+            reset_token()
+            try:
+                pixbuf = grab_screen()
+            except CaptureError as exc2:
+                if str(exc2) != "cancelled":
+                    notify("MoMo Snap could not capture the screen", str(exc2))
+                return
+        self._overlay = Overlay(self, pixbuf)
+        self._overlay.present()
 
-    app = MoMoSnap()
-    app.pixbuf = pixbuf
-    return app.run([argv[0]])
+
+def main(argv=None):
+    argv = list(sys.argv if argv is None else argv)
+    daemon_start = "--daemon" in argv
+    app = MoMoSnap(daemon_start)
+    # --gapplication-service is GLib's own flag (D-Bus service mode); it must
+    # reach run(). Everything else is stripped.
+    passthrough = [a for a in argv[1:] if a.startswith("--gapplication")]
+    return app.run([argv[0]] + passthrough)
 
 
 if __name__ == "__main__":
