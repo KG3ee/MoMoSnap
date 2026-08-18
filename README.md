@@ -17,7 +17,8 @@ silent forever.
 |-----|--------------|
 | `F1` | Start a capture. The screen dims and the cursor becomes a crosshair. |
 | drag | Click the first corner, drag, release at the second corner. |
-| drag an edge | Resize the box after release. |
+| drag an edge | Resize the box (the cursor becomes a two-headed arrow). |
+| drag the middle | Move the whole box (when no drawing tool is active). |
 | drag outside | Throw the box away and draw a new one. |
 | arrow keys | Nudge the box by 1 px (`Shift` = 10 px). |
 | `Enter` or `Ctrl+C` | Copy the selection to the clipboard. Nothing is copied before this. |
@@ -25,8 +26,13 @@ silent forever.
 | `Ctrl+Z` | Undo the last thing you drew. |
 | `Esc` or right-click | First press clears the selection. Second press quits. |
 
-Drawing tools: **arrow**, **rectangle**, **pen**, with six colours.
+Drawing tools: **arrow**, **rectangle**, **pen**, with six colours. No tool is
+active when the box appears, so dragging inside moves it; click a tool button to
+draw, and click it again to get move back.
 Nothing is ever saved or copied on its own. You decide.
+
+Pressing `F1` again while a capture is already on screen does nothing — the
+running capture keeps the focus.
 
 ## Requirements
 

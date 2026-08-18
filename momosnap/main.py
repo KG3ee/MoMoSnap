@@ -1,4 +1,6 @@
 """Entry point: grab the screen, then hand it to the overlay."""
+import fcntl
+import os
 import shutil
 import subprocess
 import sys
@@ -6,7 +8,36 @@ import sys
 import gi
 
 gi.require_version("Gtk", "4.0")
-from gi.repository import Gio, Gtk  # noqa: E402
+from gi.repository import Gio, GLib, Gtk  # noqa: E402
+
+_LOCK_FD = None
+
+
+def acquire_lock():
+    """One overlay at a time: F1 while a capture is on screen is ignored."""
+    global _LOCK_FD
+    path = os.path.join(GLib.get_user_runtime_dir(), "momosnap.lock")
+    fd = os.open(path, os.O_CREAT | os.O_RDWR, 0o600)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        os.close(fd)
+        return False
+    _LOCK_FD = fd
+    return True
+
+
+def release_lock():
+    """Called when the overlay leaves the screen. The clipboard holder keeps
+    living without the lock, so the NEXT F1 press must work again."""
+    global _LOCK_FD
+    if _LOCK_FD is not None:
+        try:
+            fcntl.flock(_LOCK_FD, fcntl.LOCK_UN)
+            os.close(_LOCK_FD)
+        except OSError:
+            pass
+        _LOCK_FD = None
 
 from .capture import CaptureError, grab_screen, reset_token
 from .overlay import Overlay
@@ -35,6 +66,10 @@ def notify(summary, body=""):
 
 def main(argv=None):
     argv = list(sys.argv if argv is None else argv)
+
+    if not acquire_lock():
+        # An overlay is already open; repeated F1 presses are ignored.
+        return 0
 
     # The screen is captured BEFORE any window exists, otherwise the overlay
     # would photograph itself.

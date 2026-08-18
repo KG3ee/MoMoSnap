@@ -60,7 +60,7 @@ class Overlay(Gtk.ApplicationWindow):
         self.drag_origin = None
         self.shapes = []              # committed annotations
         self.preview = None           # shape being dragged right now
-        self.tool = TOOL_ARROW
+        self.tool = None              # None = dragging inside MOVES the box
         self.colour = PALETTE[0][0]
         self.line_width = 3.0
         self._clipboard_held = False
@@ -88,6 +88,8 @@ class Overlay(Gtk.ApplicationWindow):
 
         self.resize_edges = None      # e.g. {"l","t"} while dragging a corner
         self.resize_start = None
+        self.move_start = None        # selection at the moment a move began
+        self._cursor_name = "crosshair"
 
         drag = Gtk.GestureDrag()
         drag.connect("drag-begin", self._on_drag_begin)
@@ -100,6 +102,11 @@ class Overlay(Gtk.ApplicationWindow):
         rclick.set_button(3)
         rclick.connect("pressed", lambda *_: self._escape())
         self.area.add_controller(rclick)
+
+        # Live cursor feedback: resize arrows on edges, move hand inside.
+        motion = Gtk.EventControllerMotion()
+        motion.connect("motion", self._on_motion)
+        self.area.add_controller(motion)
 
         keys = Gtk.EventControllerKey()
         keys.connect("key-pressed", self._on_key)
@@ -223,6 +230,28 @@ class Overlay(Gtk.ApplicationWindow):
         return self.sel
 
     # ------------------------------------------------------------- gestures
+    def _cursor_for(self, ix, iy):
+        edges = self._hit_edges(ix, iy)
+        if edges:
+            if edges in ({"l", "t"}, {"r", "b"}):
+                return "nwse-resize"
+            if edges in ({"l", "b"}, {"r", "t"}):
+                return "nesw-resize"
+            if edges & {"l", "r"}:
+                return "ew-resize"
+            return "ns-resize"
+        if self._inside_selection(ix, iy):
+            return "move" if self.tool is None else "crosshair"
+        return "crosshair"
+
+    def _on_motion(self, _c, wx, wy):
+        if self.mode != "edit" or self.drag_origin:
+            return
+        name = self._cursor_for(*self._to_image(wx, wy))
+        if name != self._cursor_name:
+            self._cursor_name = name
+            self.area.set_cursor(Gdk.Cursor.new_from_name(name))
+
     def _hit_edges(self, ix, iy):
         """Which selection edges are under the point, within a grab margin."""
         if not self.sel:
@@ -258,7 +287,11 @@ class Overlay(Gtk.ApplicationWindow):
             self.resize_start = self.sel
             self.toolbar.set_visible(False)
         elif self._inside_selection(ix, iy):
-            if self.tool == TOOL_PEN:
+            if self.tool is None:
+                # No tool chosen: dragging inside moves the whole box.
+                self.move_start = self.sel
+                self.toolbar.set_visible(False)
+            elif self.tool == TOOL_PEN:
                 self.preview = {"kind": TOOL_PEN, "points": [(ix, iy)],
                                 "colour": self.colour, "width": self.line_width}
             else:
@@ -284,6 +317,11 @@ class Overlay(Gtk.ApplicationWindow):
         if self.mode == "select":
             x0, y0 = self.drag_origin
             self.sel = (min(x0, ix), min(y0, iy), abs(ix - x0), abs(iy - y0))
+        elif self.move_start:
+            x, y, w, h = self.move_start
+            nx = max(0.0, min(x + (ix - self.drag_origin[0]), self.img_w - w))
+            ny = max(0.0, min(y + (iy - self.drag_origin[1]), self.img_h - h))
+            self.sel = (nx, ny, w, h)
         elif self.resize_edges:
             x, y, w, h = self.resize_start
             x0, y0, x1, y1 = x, y, x + w, y + h
@@ -316,6 +354,9 @@ class Overlay(Gtk.ApplicationWindow):
                 self._show_toolbar()
             else:
                 self.sel = None       # stray click, stay in select mode
+        elif self.move_start:
+            self.move_start = None
+            self._show_toolbar()
         elif self.resize_edges:
             self.resize_edges = None
             self.resize_start = None
@@ -370,7 +411,6 @@ class Overlay(Gtk.ApplicationWindow):
             b.connect("toggled", self._on_tool_toggled, tool)
             bar.append(b)
             self._tool_buttons[tool] = b
-        self._tool_buttons[self.tool].set_active(True)
 
         bar.append(Gtk.Separator(orientation=Gtk.Orientation.VERTICAL))
 
@@ -407,15 +447,14 @@ class Overlay(Gtk.ApplicationWindow):
         return bar
 
     def _on_tool_toggled(self, button, tool):
-        if not button.get_active():
-            # Don't let the user switch every tool off.
-            if self.tool == tool:
-                button.set_active(True)
-            return
-        self.tool = tool
-        for name, b in self._tool_buttons.items():
-            if name != tool:
-                b.set_active(False)
+        if button.get_active():
+            self.tool = tool
+            for name, b in self._tool_buttons.items():
+                if name != tool:
+                    b.set_active(False)
+        elif self.tool == tool:
+            # Toggling the active tool off returns to move mode.
+            self.tool = None
 
     def _on_colour(self, button, hex_colour):
         self.colour = hex_colour
@@ -476,6 +515,10 @@ class Overlay(Gtk.ApplicationWindow):
         # On Wayland the clipboard dies with the process that owns it, so the
         # window is hidden and the app stays alive until another program takes
         # the clipboard over. No timeout: a paste an hour later must work.
+        # The F1 lock is released here: the overlay is gone, so the next
+        # press must start a fresh capture even while this process lingers.
+        from .main import release_lock
+        release_lock()
         self._clipboard_held = True
         self.set_visible(False)
         clipboard.connect("changed", self._on_clipboard_changed)
