@@ -28,6 +28,14 @@ class CaptureError(Exception):
     pass
 
 
+def reset_token():
+    """Forget the stored permission token so the next run asks again."""
+    try:
+        os.remove(TOKEN_FILE)
+    except OSError:
+        pass
+
+
 def _load_token():
     try:
         with open(TOKEN_FILE) as fh:
@@ -118,7 +126,7 @@ class _PortalSession:
             opts["restore_token"] = GLib.Variant("s", saved)
         self._call("SelectSources", (self.session, opts), self._on_sources)
 
-    def open(self, timeout_seconds=60):
+    def open(self, timeout_seconds=300):
         self._call(
             "CreateSession",
             ({"session_handle_token": GLib.Variant("s", "momosnap")},),
@@ -183,8 +191,20 @@ def _grab_pixbuf(fd, node_id, timeout_seconds=10):
         finally:
             buf.unmap(info)
 
+        # Use the buffer's real row stride when the compositor pads rows;
+        # assuming width*4 shears the image diagonally on some monitors.
+        stride = width * 4
+        try:
+            gi.require_version("GstVideo", "1.0")
+            from gi.repository import GstVideo
+            meta = GstVideo.buffer_get_video_meta(buf)
+            if meta and meta.stride[0]:
+                stride = meta.stride[0]
+        except (ImportError, ValueError):
+            pass
+
         return GdkPixbuf.Pixbuf.new_from_bytes(
-            data, GdkPixbuf.Colorspace.RGB, True, 8, width, height, width * 4
+            data, GdkPixbuf.Colorspace.RGB, True, 8, width, height, stride
         )
     finally:
         pipeline.set_state(Gst.State.NULL)

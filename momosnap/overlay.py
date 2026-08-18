@@ -86,11 +86,20 @@ class Overlay(Gtk.ApplicationWindow):
         overlay.add_overlay(self.toolbar)
         self.set_child(overlay)
 
+        self.resize_edges = None      # e.g. {"l","t"} while dragging a corner
+        self.resize_start = None
+
         drag = Gtk.GestureDrag()
         drag.connect("drag-begin", self._on_drag_begin)
         drag.connect("drag-update", self._on_drag_update)
         drag.connect("drag-end", self._on_drag_end)
         self.area.add_controller(drag)
+
+        # Snipaste muscle memory: right-click steps back (clear, then quit).
+        rclick = Gtk.GestureClick()
+        rclick.set_button(3)
+        rclick.connect("pressed", lambda *_: self._escape())
+        self.area.add_controller(rclick)
 
         keys = Gtk.EventControllerKey()
         keys.connect("key-pressed", self._on_key)
@@ -214,20 +223,55 @@ class Overlay(Gtk.ApplicationWindow):
         return self.sel
 
     # ------------------------------------------------------------- gestures
+    def _hit_edges(self, ix, iy):
+        """Which selection edges are under the point, within a grab margin."""
+        if not self.sel:
+            return None
+        scale_x, _ = self._scale()
+        t = 10 * scale_x                      # ~10 widget px, in image units
+        x, y, w, h = self.sel
+        if not (x - t <= ix <= x + w + t and y - t <= iy <= y + h + t):
+            return None
+        edges = set()
+        if abs(ix - x) <= t:
+            edges.add("l")
+        if abs(ix - (x + w)) <= t:
+            edges.add("r")
+        if abs(iy - y) <= t:
+            edges.add("t")
+        if abs(iy - (y + h)) <= t:
+            edges.add("b")
+        return edges or None
+
     def _on_drag_begin(self, gesture, sx, sy):
         ix, iy = self._to_image(sx, sy)
         self.drag_origin = (ix, iy)
         if self.mode == "select":
             self.sel = (ix, iy, 0, 0)
-        else:
-            if not self._inside_selection(ix, iy):
-                return
+            self.area.queue_draw()
+            return
+
+        edges = self._hit_edges(ix, iy)
+        if edges:
+            # Grabbing a border resizes the box instead of drawing.
+            self.resize_edges = edges
+            self.resize_start = self.sel
+            self.toolbar.set_visible(False)
+        elif self._inside_selection(ix, iy):
             if self.tool == TOOL_PEN:
                 self.preview = {"kind": TOOL_PEN, "points": [(ix, iy)],
                                 "colour": self.colour, "width": self.line_width}
             else:
                 self.preview = {"kind": self.tool, "box": (ix, iy, ix, iy),
                                 "colour": self.colour, "width": self.line_width}
+        else:
+            # Dragging outside the box starts a brand-new selection, so a
+            # badly placed box costs one redraw, not an Esc round-trip.
+            self.mode = "select"
+            self.sel = (ix, iy, 0, 0)
+            self.shapes.clear()
+            self.toolbar.set_visible(False)
+            self.area.set_cursor(Gdk.Cursor.new_from_name("crosshair"))
         self.area.queue_draw()
 
     def _on_drag_update(self, gesture, ox, oy):
@@ -240,6 +284,18 @@ class Overlay(Gtk.ApplicationWindow):
         if self.mode == "select":
             x0, y0 = self.drag_origin
             self.sel = (min(x0, ix), min(y0, iy), abs(ix - x0), abs(iy - y0))
+        elif self.resize_edges:
+            x, y, w, h = self.resize_start
+            x0, y0, x1, y1 = x, y, x + w, y + h
+            if "l" in self.resize_edges:
+                x0 = min(ix, x1 - MIN_SELECTION)
+            if "r" in self.resize_edges:
+                x1 = max(ix, x0 + MIN_SELECTION)
+            if "t" in self.resize_edges:
+                y0 = min(iy, y1 - MIN_SELECTION)
+            if "b" in self.resize_edges:
+                y1 = max(iy, y0 + MIN_SELECTION)
+            self.sel = self._clamp_selection((x0, y0, x1 - x0, y1 - y0))
         elif self.preview:
             ix, iy = self._clamp_to_selection(ix, iy)
             if self.preview["kind"] == TOOL_PEN:
@@ -260,8 +316,21 @@ class Overlay(Gtk.ApplicationWindow):
                 self._show_toolbar()
             else:
                 self.sel = None       # stray click, stay in select mode
+        elif self.resize_edges:
+            self.resize_edges = None
+            self.resize_start = None
+            self._show_toolbar()
         elif self.preview:
-            self.shapes.append(self.preview)
+            # A plain click emits drag-begin+end with no movement; committing
+            # that would stamp a junk arrowhead into the export.
+            pv = self.preview
+            if pv["kind"] == TOOL_PEN:
+                keep = len(pv["points"]) >= 2
+            else:
+                x0, y0, x1, y1 = pv["box"]
+                keep = abs(x1 - x0) + abs(y1 - y0) >= 3
+            if keep:
+                self.shapes.append(pv)
             self.preview = None
         self.drag_origin = None
         self.area.queue_draw()
@@ -305,6 +374,7 @@ class Overlay(Gtk.ApplicationWindow):
 
         bar.append(Gtk.Separator(orientation=Gtk.Orientation.VERTICAL))
 
+        self._swatches = []
         for hex_colour, name in PALETTE:
             sw = Gtk.Button(tooltip_text=name)
             sw.set_size_request(22, 22)
@@ -314,10 +384,14 @@ class Overlay(Gtk.ApplicationWindow):
             provider = Gtk.CssProvider()
             provider.load_from_string(
                 f".momo-swatch {{ background: {hex_colour}; "
-                f"min-width:18px; min-height:18px; padding:0; }}"
+                f"min-width:18px; min-height:18px; padding:0; }} "
+                f".momo-swatch.momo-active {{ "
+                f"border: 2px solid #ffffff; }}"
             )
             ctx.add_provider(provider, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
             bar.append(sw)
+            self._swatches.append(sw)
+        self._swatches[0].add_css_class("momo-active")
 
         bar.append(Gtk.Separator(orientation=Gtk.Orientation.VERTICAL))
 
@@ -343,8 +417,11 @@ class Overlay(Gtk.ApplicationWindow):
             if name != tool:
                 b.set_active(False)
 
-    def _on_colour(self, _button, hex_colour):
+    def _on_colour(self, button, hex_colour):
         self.colour = hex_colour
+        for sw in self._swatches:
+            sw.remove_css_class("momo-active")
+        button.add_css_class("momo-active")
 
     def _show_toolbar(self):
         self.toolbar.set_visible(True)
@@ -366,9 +443,11 @@ class Overlay(Gtk.ApplicationWindow):
     # ---------------------------------------------------------------- export
     def _render_selection(self):
         """Flatten the selection plus its annotations into a GdkPixbuf."""
-        x, y, w, h = (int(round(v)) for v in self.sel)
-        w = max(1, w)
-        h = max(1, h)
+        fx, fy, fw, fh = self.sel
+        x = max(0, math.floor(fx))
+        y = max(0, math.floor(fy))
+        w = max(1, min(self.img_w, math.ceil(fx + fw)) - x)
+        h = max(1, min(self.img_h, math.ceil(fy + fh)) - y)
         surface = cairo.ImageSurface(cairo.FORMAT_ARGB32, w, h)
         cr = cairo.Context(surface)
         cr.translate(-x, -y)
@@ -386,14 +465,20 @@ class Overlay(Gtk.ApplicationWindow):
         texture = Gdk.Texture.new_for_pixbuf(pixbuf)
         clipboard = self.get_display().get_clipboard()
         value = GObject.Value(Gdk.Texture, texture)
-        clipboard.set_content(Gdk.ContentProvider.new_for_value(value))
+        ok = clipboard.set_content(Gdk.ContentProvider.new_for_value(value))
+        if not ok:
+            # The compositor refused the claim; pretending otherwise would
+            # leave the user pasting nothing.
+            from .main import notify
+            notify("Copy failed", "The clipboard refused the image.")
+            return
 
         # On Wayland the clipboard dies with the process that owns it, so the
-        # window is hidden and the app kept alive until something else takes over.
+        # window is hidden and the app stays alive until another program takes
+        # the clipboard over. No timeout: a paste an hour later must work.
         self._clipboard_held = True
         self.set_visible(False)
         clipboard.connect("changed", self._on_clipboard_changed)
-        GLib.timeout_add_seconds(600, self._release_clipboard)
 
     def _on_clipboard_changed(self, clipboard):
         if self._clipboard_held and not clipboard.is_local():
@@ -417,7 +502,8 @@ class Overlay(Gtk.ApplicationWindow):
         name = time.strftime("MoMoSnap_%Y-%m-%d_%H-%M-%S.png")
         path = os.path.join(folder, name)
         self._render_selection().savev(path, "png", [], [])
-        print(f"saved: {path}")
+        from .main import notify
+        notify("Saved", f"Pictures/Screenshots/{name}")
         self.close()
 
     def undo(self):
@@ -426,19 +512,38 @@ class Overlay(Gtk.ApplicationWindow):
             self.area.queue_draw()
 
     # -------------------------------------------------------------- keyboard
+    def _escape(self):
+        if self.mode == "edit":
+            # First step back drops the selection, the second quits.
+            self.mode = "select"
+            self.sel = None
+            self.shapes.clear()
+            self.toolbar.set_visible(False)
+            self.area.set_cursor(Gdk.Cursor.new_from_name("crosshair"))
+            self.area.queue_draw()
+        else:
+            self.close()
+
+    _NUDGE = {Gdk.KEY_Left: (-1, 0), Gdk.KEY_Right: (1, 0),
+              Gdk.KEY_Up: (0, -1), Gdk.KEY_Down: (0, 1)}
+
     def _on_key(self, _c, keyval, _keycode, state):
         ctrl = bool(state & Gdk.ModifierType.CONTROL_MASK)
         if keyval == Gdk.KEY_Escape:
-            if self.mode == "edit":
-                # First Escape drops the selection, second one quits.
-                self.mode = "select"
-                self.sel = None
-                self.shapes.clear()
-                self.toolbar.set_visible(False)
-                self.area.set_cursor(Gdk.Cursor.new_from_name("crosshair"))
-                self.area.queue_draw()
-            else:
-                self.close()
+            self._escape()
+            return True
+        if keyval in (Gdk.KEY_Return, Gdk.KEY_KP_Enter) and self.mode == "edit":
+            self.copy_to_clipboard()
+            return True
+        if self.mode == "edit" and self.sel and keyval in self._NUDGE:
+            dx, dy = self._NUDGE[keyval]
+            step = 10 if state & Gdk.ModifierType.SHIFT_MASK else 1
+            x, y, w, h = self.sel
+            x = max(0, min(x + dx * step, self.img_w - w))
+            y = max(0, min(y + dy * step, self.img_h - h))
+            self.sel = (x, y, w, h)
+            self._show_toolbar()
+            self.area.queue_draw()
             return True
         if ctrl and keyval in (Gdk.KEY_c, Gdk.KEY_C):
             self.copy_to_clipboard()

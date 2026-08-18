@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=MoMo Snap
+Comment=Region screenshot with annotations
+Exec=/home/kg/Projects/snipkg/momosnap-run
+Icon=applets-screenshooter
+Terminal=false
+NoDisplay=true
+StartupNotify=false
