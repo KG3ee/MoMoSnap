@@ -40,6 +40,10 @@ PALETTE = [
 TOOL_ARROW = "arrow"
 TOOL_RECT = "rect"
 TOOL_PEN = "pen"
+TOOL_TEXT = "text"
+
+# stroke size -> (line width, text size), all in image pixels
+STROKES = {"s": (1.5, 13.0), "m": (3.0, 18.0), "l": (6.0, 28.0)}
 
 
 def _rgba(hex_colour):
@@ -62,7 +66,9 @@ class Overlay(Gtk.ApplicationWindow):
         self.preview = None           # shape being dragged right now
         self.tool = None              # None = dragging inside MOVES the box
         self.colour = PALETTE[0][0]
-        self.line_width = 3.0
+        self.line_width, self.font_size = STROKES["m"]
+        self._text_entry = None       # live Gtk.Entry while typing a label
+        self._text_pos = None         # image-px anchor of that entry
         self._clipboard_held = False
 
         self.set_decorated(False)
@@ -74,6 +80,7 @@ class Overlay(Gtk.ApplicationWindow):
 
         overlay = Gtk.Overlay()
         overlay.set_child(self.area)
+        self._overlay_box = overlay   # text entries are overlaid here too
 
         self.toolbar = self._build_toolbar()
         self.toolbar.set_visible(False)
@@ -186,7 +193,7 @@ class Overlay(Gtk.ApplicationWindow):
     def _draw_shape(cr, shape):
         c = _rgba(shape["colour"])
         cr.set_source_rgba(c.red, c.green, c.blue, 1.0)
-        cr.set_line_width(shape["width"])
+        cr.set_line_width(shape.get("width", 1.0))   # text has no stroke
         cr.set_line_cap(1)   # round
         cr.set_line_join(1)
 
@@ -206,6 +213,13 @@ class Overlay(Gtk.ApplicationWindow):
             for p in pts[1:]:
                 cr.line_to(*p)
             cr.stroke()
+        elif kind == TOOL_TEXT:
+            cr.select_font_face("sans", cairo.FONT_SLANT_NORMAL,
+                                cairo.FONT_WEIGHT_BOLD)
+            cr.set_font_size(shape["size"])
+            x, y = shape["pos"]
+            cr.move_to(x, y + shape["size"])
+            cr.show_text(shape["text"])
 
     @staticmethod
     def _draw_arrow(cr, x0, y0, x1, y1, width):
@@ -241,7 +255,9 @@ class Overlay(Gtk.ApplicationWindow):
                 return "ew-resize"
             return "ns-resize"
         if self._inside_selection(ix, iy):
-            return "move" if self.tool is None else "crosshair"
+            if self.tool is None:
+                return "move"
+            return "text" if self.tool == TOOL_TEXT else "crosshair"
         return "crosshair"
 
     def _on_motion(self, _c, wx, wy):
@@ -273,6 +289,9 @@ class Overlay(Gtk.ApplicationWindow):
         return edges or None
 
     def _on_drag_begin(self, gesture, sx, sy):
+        if self._text_entry is not None:
+            # Clicking elsewhere finishes the label being typed, like editors do.
+            self._commit_text()
         ix, iy = self._to_image(sx, sy)
         self.drag_origin = (ix, iy)
         if self.mode == "select":
@@ -291,6 +310,10 @@ class Overlay(Gtk.ApplicationWindow):
                 # No tool chosen: dragging inside moves the whole box.
                 self.move_start = self.sel
                 self.toolbar.set_visible(False)
+            elif self.tool == TOOL_TEXT:
+                self._start_text_input(sx, sy, ix, iy)
+                self.drag_origin = None
+                return
             elif self.tool == TOOL_PEN:
                 self.preview = {"kind": TOOL_PEN, "points": [(ix, iy)],
                                 "colour": self.colour, "width": self.line_width}
@@ -394,6 +417,49 @@ class Overlay(Gtk.ApplicationWindow):
         x, y, w, h = self.sel
         return max(x, min(ix, x + w)), max(y, min(iy, y + h))
 
+    # ----------------------------------------------------------------- text
+    def _start_text_input(self, wx, wy, ix, iy):
+        entry = Gtk.Entry()
+        entry.set_width_chars(14)
+        entry.set_halign(Gtk.Align.START)
+        entry.set_valign(Gtk.Align.START)
+        entry.set_margin_start(max(0, int(wx)))
+        entry.set_margin_top(max(0, int(wy)))
+        entry.connect("activate", lambda *_: self._commit_text())
+
+        keys = Gtk.EventControllerKey()
+
+        def on_key(_c, keyval, _kc, _state):
+            if keyval == Gdk.KEY_Escape:
+                self._remove_text_entry()   # cancel just the label
+                return True
+            return False
+
+        keys.connect("key-pressed", on_key)
+        entry.add_controller(keys)
+
+        self._text_entry = entry
+        self._text_pos = (ix, iy)
+        self._overlay_box.add_overlay(entry)
+        entry.grab_focus()
+
+    def _commit_text(self):
+        entry, pos = self._text_entry, self._text_pos
+        if entry is None:
+            return
+        text = entry.get_text().strip()
+        self._remove_text_entry()
+        if text:
+            self.shapes.append({"kind": TOOL_TEXT, "pos": pos, "text": text,
+                                "colour": self.colour, "size": self.font_size})
+            self.area.queue_draw()
+
+    def _remove_text_entry(self):
+        if self._text_entry is not None:
+            self._overlay_box.remove_overlay(self._text_entry)
+            self._text_entry = None
+            self._text_pos = None
+
     # -------------------------------------------------------------- toolbar
     def _build_toolbar(self):
         bar = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
@@ -406,6 +472,7 @@ class Overlay(Gtk.ApplicationWindow):
             (TOOL_ARROW, "mail-forward-symbolic", "Arrow"),
             (TOOL_RECT, "checkbox-symbolic", "Rectangle"),
             (TOOL_PEN, "document-edit-symbolic", "Pen"),
+            (TOOL_TEXT, "insert-text-symbolic", "Text"),
         ):
             b = Gtk.ToggleButton(icon_name=icon, tooltip_text=tip)
             b.connect("toggled", self._on_tool_toggled, tool)
@@ -435,7 +502,20 @@ class Overlay(Gtk.ApplicationWindow):
 
         bar.append(Gtk.Separator(orientation=Gtk.Orientation.VERTICAL))
 
+        self._stroke_buttons = {}
+        for key, label, tip in (("s", "•", "Thin"),
+                                ("m", "●", "Medium"),
+                                ("l", "⬤", "Thick")):
+            b = Gtk.ToggleButton(label=label, tooltip_text=tip)
+            b.connect("toggled", self._on_stroke_toggled, key)
+            bar.append(b)
+            self._stroke_buttons[key] = b
+        self._stroke_buttons["m"].set_active(True)
+
+        bar.append(Gtk.Separator(orientation=Gtk.Orientation.VERTICAL))
+
         for icon, tip, cb in (
+            ("view-pin-symbolic", "Pin on screen (F3)", lambda *_: self.pin()),
             ("edit-undo-symbolic", "Undo (Ctrl+Z)", lambda *_: self.undo()),
             ("edit-copy-symbolic", "Copy (Ctrl+C)", lambda *_: self.copy_to_clipboard()),
             ("document-save-symbolic", "Save (Ctrl+S)", lambda *_: self.save()),
@@ -455,6 +535,15 @@ class Overlay(Gtk.ApplicationWindow):
         elif self.tool == tool:
             # Toggling the active tool off returns to move mode.
             self.tool = None
+
+    def _on_stroke_toggled(self, button, key):
+        if button.get_active():
+            self.line_width, self.font_size = STROKES[key]
+            for k, b in self._stroke_buttons.items():
+                if k != key:
+                    b.set_active(False)
+        elif not any(b.get_active() for b in self._stroke_buttons.values()):
+            button.set_active(True)   # one size is always selected
 
     def _on_colour(self, button, hex_colour):
         self.colour = hex_colour
@@ -549,6 +638,24 @@ class Overlay(Gtk.ApplicationWindow):
         notify("Saved", f"Pictures/Screenshots/{name}")
         self.close()
 
+    def pin(self):
+        """Float the selection as a frameless window and leave the overlay."""
+        if not self.sel:
+            return
+        if self._text_entry is not None:
+            self._commit_text()
+        pixbuf = self._render_selection()
+        # Widget px per image px: the pin should appear at on-screen size.
+        fx = (self.area.get_width() or self.img_w) / self.img_w
+        from .main import release_lock
+        from .pin import PinWindow
+        win = PinWindow(self.get_application(), pixbuf,
+                        int(pixbuf.get_width() * fx),
+                        int(pixbuf.get_height() * fx))
+        win.present()
+        release_lock()               # the overlay is gone; F1 must work again
+        self.close()
+
     def undo(self):
         if self.shapes:
             self.shapes.pop()
@@ -571,9 +678,14 @@ class Overlay(Gtk.ApplicationWindow):
               Gdk.KEY_Up: (0, -1), Gdk.KEY_Down: (0, 1)}
 
     def _on_key(self, _c, keyval, _keycode, state):
+        if self._text_entry is not None:
+            return False              # the label entry owns the keyboard
         ctrl = bool(state & Gdk.ModifierType.CONTROL_MASK)
         if keyval == Gdk.KEY_Escape:
             self._escape()
+            return True
+        if keyval == Gdk.KEY_F3 and self.mode == "edit":
+            self.pin()
             return True
         if keyval in (Gdk.KEY_Return, Gdk.KEY_KP_Enter) and self.mode == "edit":
             self.copy_to_clipboard()

@@ -29,7 +29,10 @@ to launch the tool.
 - **Region select** — screen dims, crosshair cursor, drag a box
 - **Adjust after release** — drag edges/corners to resize (proper resize
   cursors), drag the middle to move, arrow keys to nudge (`Shift` = 10 px)
-- **Annotate** — arrow, rectangle, freehand pen, six colours, undo
+- **Annotate** — arrow, rectangle, freehand pen, text labels, six colours,
+  three stroke/text sizes, undo
+- **Pin to screen** — float the capture as a frameless window (Snipaste-style);
+  drag it anywhere, `Esc`/right-click closes it
 - **Clipboard-first** — `Enter`/`Ctrl+C` copies; nothing is saved or uploaded
   unless you ask; `Ctrl+S` saves to `~/Pictures/Screenshots` with a notification
 - **Correct on HiDPI / fractional scaling** (tested at 125%)
@@ -72,7 +75,9 @@ Note that binding `F1` takes it away from "Help" in other apps.
 | drag the middle | Move the whole box (when no drawing tool is active). |
 | drag outside the box | Throw it away and draw a new one. |
 | arrow keys | Nudge the box 1 px, `Shift`+arrows = 10 px. |
-| toolbar | Pick arrow / rectangle / pen and a colour; click the tool again to go back to move mode. |
+| toolbar | Pick arrow / rectangle / pen / text, a colour, and a stroke size; click the tool again to go back to move mode. |
+| text tool + click | An input box appears; type and press `Enter` to place the label (`Esc` cancels just the label). |
+| `F3` or the pin button | Float the selection as a frameless always-visible window. Drag it around; double-, middle- or right-click (or `Esc`) closes it. |
 | `Enter` or `Ctrl+C` | Copy to clipboard and close. |
 | `Ctrl+S` | Save PNG to `~/Pictures/Screenshots` (desktop notification confirms). |
 | `Ctrl+Z` | Undo the last drawing. |
@@ -106,7 +111,10 @@ No root, no shell-outs for capture, no screen recording — one frame per press.
 
 - GNOME on **Wayland** only (that is the whole point; on X11 just use Flameshot)
 - Single monitor for now
-- No pin-to-screen, text tool, or line-width control yet — planned
+- Wayland lets no app force itself above all windows, so a pin starts as a
+  normal window. To make it truly always-on-top: focus the pin, press
+  `Alt+Space`, choose **Always on Top**. Wayland also decides where new windows
+  open, so the pin appears centered rather than over the captured spot.
 
 ## License
 
